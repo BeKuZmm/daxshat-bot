@@ -32,8 +32,9 @@ def fmt(cents: int) -> str:
     ADMIN_MENU, ADMIN_ADD_NAME, ADMIN_ADD_PRICE, ADMIN_ADD_PHOTO, ADMIN_ADD_CONFIRM,
     ADMIN_REDUCE_DEBT_AMOUNT,
     ADMIN_ADD_DEBT_AMOUNT,
+    ADMIN_BROADCAST,
     CLIENT_PHONE
-) = range(11)
+) = range(12)
 
 
 def is_admin(user_id: int) -> bool:
@@ -54,7 +55,8 @@ def admin_menu_keyboard():
     buttons = [
         [KeyboardButton("➕ Mahsulot qo'shish"), KeyboardButton("📦 Mahsulotlar")],
         [KeyboardButton("👥 Mijozlar"), KeyboardButton("💳 Qarzlar")],
-        [KeyboardButton("📋 Buyurtmalar"), KeyboardButton("🔙 Asosiy menyu")],
+        [KeyboardButton("📋 Buyurtmalar"), KeyboardButton("📢 Xabar yuborish")],
+        [KeyboardButton("🔙 Asosiy menyu")],
     ]
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
@@ -347,6 +349,11 @@ async def handle_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await admin_show_debts(update, context)
     elif text == "📋 Buyurtmalar":
         return await admin_show_orders(update, context)
+    elif text == "📢 Xabar yuborish":
+        await update.message.reply_text(
+            "📢 Yubormoqchi bo'lgan xabaringizni yozing:\n\n(Barcha foydalanuvchilarga boradi)"
+        )
+        return ADMIN_BROADCAST
     elif text == "🔙 Asosiy menyu":
         await update.message.reply_text("Asosiy menyu:", reply_markup=main_menu_keyboard(True))
         return MAIN_MENU
@@ -649,6 +656,65 @@ def run_health_server():
     port = int(os.getenv("PORT", 10000))
     HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
 
+
+async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    users = await db.get_all_users()
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Yuborish", callback_data="broadcast_confirm"),
+            InlineKeyboardButton("❌ Bekor", callback_data="broadcast_cancel")
+        ]
+    ])
+
+    context.user_data['broadcast_text'] = text
+    await update.message.reply_text(
+        "📢 *Xabar ko'rinishi:*\n\n{}\n\n👥 {} ta foydalanuvchiga yuboriladi.\nTasdiqlaysizmi?".format(
+            text, len(users)
+        ),
+        parse_mode='Markdown',
+        reply_markup=keyboard
+    )
+    return ADMIN_BROADCAST
+
+
+async def broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "broadcast_cancel":
+        await query.edit_message_text("❌ Bekor qilindi.")
+        context.user_data.pop('broadcast_text', None)
+        return ADMIN_MENU
+
+    text = context.user_data.get('broadcast_text')
+    if not text:
+        await query.edit_message_text("❗ Xato. Qaytadan boshlang.")
+        return ADMIN_MENU
+
+    users = await db.get_all_users()
+    success = 0
+    failed = 0
+
+    await query.edit_message_text("⏳ Yuborilmoqda...")
+
+    for user in users:
+        try:
+            await context.bot.send_message(user['id'], text)
+            success += 1
+        except Exception:
+            failed += 1
+
+    context.user_data.pop('broadcast_text', None)
+    await query.edit_message_text(
+        "✅ Xabar yuborildi!\n👥 Muvaffaqiyatli: {} ta\n❌ Yuborilmadi: {} ta".format(
+            success, failed
+        )
+    )
+    return ADMIN_MENU
+
+
 async def post_init(application: Application):
     await db.connect()
     logger.info("✅ Ma'lumotlar bazasi ulandi")
@@ -699,6 +765,10 @@ def main():
             ADMIN_ADD_DEBT_AMOUNT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_debt_amount),
                 CallbackQueryHandler(callback_handler),
+            ],
+            ADMIN_BROADCAST: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast),
+                CallbackQueryHandler(broadcast_callback, pattern="^broadcast_"),
             ],
         },
         fallbacks=[CommandHandler("start", start)],
